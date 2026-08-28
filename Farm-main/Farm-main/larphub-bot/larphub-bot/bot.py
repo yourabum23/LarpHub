@@ -3,7 +3,7 @@ import secrets
 import string
 import threading
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, make_response, render_template_string
 import discord
 from discord.ext import commands
 from supabase import create_client
@@ -16,187 +16,274 @@ PORT = int(os.environ.get("PORT", 10000))
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+app = Flask(__name__)
 
-
-def is_admin(ctx):
-    return any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles)
-
-
-def generate_random_key():
+def generate_key_string():
     chars = string.ascii_uppercase + string.digits
     part1 = "".join(secrets.choice(chars) for _ in range(4))
     part2 = "".join(secrets.choice(chars) for _ in range(4))
     return f"LARP-{part1}-{part2}"
 
+def get_client_ip():
+    if request.headers.get("X-Forwarded-For"):
+        return request.headers.get("X-Forwarded-For").split(",")[0].strip()
+    return request.remote_addr
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (id={bot.user.id})")
-
-
-# ==================== DISCORD BOT COMMANDS ====================
-
-@bot.command()
-async def whitelist(ctx, roblox_userid: str, *, note: str = ""):
-    """!whitelist 123456789 gold plan"""
-    if not is_admin(ctx):
-        return await ctx.send("No permission.")
-
-    data = {
-        "roblox_userid": str(roblox_userid),
-        "discord_tag": str(ctx.author),
-        "note": note,
-        "added_by": str(ctx.author.id),
-    }
-    result = sb.table("whitelist").upsert(data, on_conflict="roblox_userid").execute()
-
-    if result.data:
-        await ctx.send(f"Whitelisted `{roblox_userid}` permanently.")
-    else:
-        await ctx.send("Failed to write to Supabase.")
-
-
-@bot.command()
-async def unwhitelist(ctx, roblox_userid: str):
-    """!unwhitelist 123456789"""
-    if not is_admin(ctx):
-        return await ctx.send("No permission.")
-
-    result = sb.table("whitelist").delete().eq("roblox_userid", str(roblox_userid)).execute()
-    if result.data:
-        await ctx.send(f"Removed `{roblox_userid}` from whitelist.")
-    else:
-        await ctx.send(f"`{roblox_userid}` was not on the whitelist.")
-
-
-@bot.command()
-async def genkey(ctx, hours: int = 24):
-    """!genkey 24 (Admin manual key generator)"""
-    if not is_admin(ctx):
-        return await ctx.send("No permission.")
-
-    new_key = generate_random_key()
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
-
-    data = {
-        "key": new_key,
-        "expires_at": expires_at,
-    }
-    sb.table("keys").insert(data).execute()
-    await ctx.send(f"Generated Key (valid for {hours}h):\n`{new_key}`")
-
-
-# ==================== FLASK KEY API & LINKVERTISE GATEWAY ====================
-
-app = Flask(__name__)
-
-HTML_PAGE = """
+KEY_PAGE_HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Larp Hub - Your 24-Hour Key</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Larp Hub - 24-Hour Key</title>
     <style>
-        body { background: #120808; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card { background: #1c0d0d; border: 2px solid #bc3e3e; border-radius: 12px; padding: 30px; text-align: center; max-width: 400px; width: 90%; box-shadow: 0 8px 24px rgba(0,0,0,0.6); }
-        h1 { color: #bc3e3e; margin-bottom: 10px; }
-        p { color: #dcb4b4; font-size: 14px; }
-        .key-box { background: #641414; padding: 15px; border-radius: 8px; font-size: 20px; font-weight: bold; letter-spacing: 2px; margin: 20px 0; user-select: all; word-break: break-all; }
-        .btn { background: #bc3e3e; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-        .btn:hover { background: #d44d4d; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body {
+            background-color: #120808;
+            color: #ffffff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .card {
+            background-color: #1f0d0d;
+            border: 2px solid #bc3e3e;
+            border-radius: 16px;
+            padding: 36px 30px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(188, 62, 62, 0.25);
+        }
+        h1 { color: #bc3e3e; font-size: 28px; margin-bottom: 8px; }
+        .tag {
+            display: inline-block;
+            background: #381212;
+            color: #ff8585;
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        p { color: #d6b4b4; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+        .key-container {
+            background-color: #2b1111;
+            border: 1px dashed #bc3e3e;
+            border-radius: 10px;
+            padding: 16px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+            letter-spacing: 2px;
+            margin-bottom: 20px;
+            user-select: all;
+            word-break: break-all;
+        }
+        .btn {
+            background-color: #bc3e3e;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: 0.2s ease;
+        }
+        .btn:hover { background-color: #d64a4a; }
+        .note {
+            margin-top: 18px;
+            font-size: 12px;
+            color: #997575;
+        }
     </style>
 </head>
 <body>
     <div class="card">
         <h1>Larp Hub</h1>
-        <p>Thank you for completing the checkpoint! Here is your 24-hour key:</p>
-        <div class="key-box" id="keyText">{{ key }}</div>
+        <div class="tag">{{ tag_text }}</div>
+        <p>{{ message_text }}</p>
+        <div class="key-container" id="keyText">{{ key }}</div>
         <button class="btn" onclick="copyKey()">Copy Key</button>
+        <div class="note">Paste this key into Larp Hub in Roblox to execute.</div>
     </div>
     <script>
         function copyKey() {
-            var text = document.getElementById('keyText').innerText;
-            navigator.clipboard.writeText(text);
-            alert('Key copied to clipboard!');
+            var text = document.getElementById("keyText").innerText.trim();
+            navigator.clipboard.writeText(text).then(function() {
+                var btn = document.querySelector(".btn");
+                btn.innerText = "Copied to Clipboard!";
+                btn.style.backgroundColor = "#2e8b57";
+                setTimeout(function() {
+                    btn.innerText = "Copy Key";
+                    btn.style.backgroundColor = "#bc3e3e";
+                }, 2000);
+            });
         }
     </script>
 </body>
 </html>
 """
 
-@app.get("/")
-def home():
-    return "LarpHub bot online", 200
+@app.route("/getkey", methods=["GET"])
+def get_key_page():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    client_ip = get_client_ip()
+    cookie_key = request.cookies.get("larp_active_key")
+    
+    active_key_data = None
+    
+    if cookie_key:
+        res = sb.table("keys").select("*").eq("key", cookie_key).gt("expires_at", now_iso).execute()
+        if res.data:
+            active_key_data = res.data[0]
+            
+    if not active_key_data and client_ip:
+        res = sb.table("keys").select("*").eq("ip_address", client_ip).gt("expires_at", now_iso).order("created_at", desc=True).limit(1).execute()
+        if res.data:
+            active_key_data = res.data[0]
+            
+    if active_key_data:
+        key = active_key_data["key"]
+        expires_at = datetime.fromisoformat(active_key_data["expires_at"].replace("Z", "+00:00"))
+        remaining = expires_at - datetime.now(timezone.utc)
+        hours = int(remaining.total_seconds() // 3600)
+        minutes = int((remaining.total_seconds() % 3600) // 60)
+        
+        tag_text = f"ACTIVE KEY ({hours}h {minutes}m remaining)"
+        message_text = "You already have an active 24-hour key. You don't need to do any more checkpoints until this key expires!"
+        
+        response = make_response(render_template_string(
+            KEY_PAGE_HTML,
+            key=key,
+            tag_text=tag_text,
+            message_text=message_text
+        ))
+        response.set_cookie("larp_active_key", key, max_age=int(remaining.total_seconds()), httponly=True, samesite="Lax")
+        return response
 
-@app.get("/health")
-def health():
-    return {"ok": True, "bot": str(bot.user) if bot.user else None}, 200
+    new_key = generate_key_string()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    
+    sb.table("keys").insert({
+        "key": new_key,
+        "ip_address": client_ip,
+        "expires_at": expires_at.isoformat(),
+        "created_at": now_iso,
+        "roblox_userid": None
+    }).execute()
+    
+    response = make_response(render_template_string(
+        KEY_PAGE_HTML,
+        key=new_key,
+        tag_text="NEW 24-HOUR KEY",
+        message_text="Thank you for completing the checkpoint! Here is your fresh 24-hour key:"
+    ))
+    response.set_cookie("larp_active_key", new_key, max_age=86400, httponly=True, samesite="Lax")
+    return response
 
-@app.get("/getkey")
-def getkey():
-    new_key = generate_random_key()
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
 
-    sb.table("keys").insert({"key": new_key, "expires_at": expires_at}).execute()
-    return render_template_string(HTML_PAGE, key=new_key)
-
-@app.post("/redeem")
+@app.route("/redeem", methods=["POST"])
 def redeem_key():
-    req_data = request.json or {}
-    key = str(req_data.get("key", "")).strip()
-    user_id = str(req_data.get("roblox_userid", "")).strip()
+    """Validates key and locks it to the player's Roblox UserID"""
+    data = request.json or {}
+    key = data.get("key", "").strip()
+    roblox_userid = str(data.get("roblox_userid", "")).strip()
 
-    if not key or not user_id:
-        return jsonify({"valid": False, "message": "Missing key or UserId"}), 400
+    if not key or not roblox_userid:
+        return jsonify({"valid": False, "message": "Missing key or userid"}), 400
 
-    res = sb.table("keys").select("*").eq("key", key).execute()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    res = sb.table("keys").select("*").eq("key", key).gt("expires_at", now_iso).execute()
+    
     if not res.data:
-        return jsonify({"valid": False, "message": "Invalid key"}), 200
+        return jsonify({"valid": False, "message": "Key is invalid or expired"}), 200
 
-    key_record = res.data[0]
-    expires_at = datetime.fromisoformat(key_record["expires_at"].replace("Z", "+00:00"))
+    record = res.data[0]
 
-    if datetime.now(timezone.utc) > expires_at:
-        return jsonify({"valid": False, "message": "Key has expired (24h limit reached)"}), 200
+    if record.get("roblox_userid") and record["roblox_userid"] != roblox_userid:
+        return jsonify({"valid": False, "message": "This key is bound to another Roblox account"}), 200
 
-    bound_user = key_record.get("roblox_userid")
-    if bound_user and bound_user != user_id:
-        return jsonify({"valid": False, "message": "Key is locked to another user!"}), 200
+    if not record.get("roblox_userid"):
+        sb.table("keys").update({"roblox_userid": roblox_userid}).eq("key", key).execute()
 
-    if not bound_user:
-        sb.table("keys").update({"roblox_userid": user_id}).eq("key", key).execute()
+    return jsonify({"valid": True, "message": "Key accepted!"}), 200
 
-    return jsonify({"valid": True, "message": "Key valid!"}), 200
 
-@app.post("/check")
+@app.route("/check", methods=["POST"])
 def check_key():
-    req_data = request.json or {}
-    key = str(req_data.get("key", "")).strip()
-    user_id = str(req_data.get("roblox_userid", "")).strip()
+    """Checks if a saved key is still valid and owned by the player"""
+    data = request.json or {}
+    key = data.get("key", "").strip()
+    roblox_userid = str(data.get("roblox_userid", "")).strip()
 
-    res = sb.table("keys").select("*").eq("key", key).execute()
-    if not res.data:
-        return jsonify({"valid": False}), 200
+    if not key or not roblox_userid:
+        return jsonify({"valid": False}), 400
 
-    key_record = res.data[0]
-    expires_at = datetime.fromisoformat(key_record["expires_at"].replace("Z", "+00:00"))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    res = sb.table("keys").select("*").eq("key", key).eq("roblox_userid", roblox_userid).gt("expires_at", now_iso).execute()
 
-    if datetime.now(timezone.utc) > expires_at:
-        return jsonify({"valid": False}), 200
+    if res.data:
+        return jsonify({"valid": True}), 200
+    return jsonify({"valid": False}), 200
 
-    if key_record.get("roblox_userid") != user_id:
-        return jsonify({"valid": False}), 200
 
-    return jsonify({"valid": True}), 200
+@app.route("/")
+def index():
+    return "Larp Hub API is online."
 
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+def is_admin(ctx):
+    return any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles)
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (id={bot.user.id})")
+
+@bot.command()
+async def whitelist(ctx, roblox_userid: str, *, note: str = ""):
+    if not is_admin(ctx):
+        return await ctx.send("No permission.")
+    sb.table("whitelist").upsert({
+        "roblox_userid": str(roblox_userid),
+        "discord_tag": str(ctx.author),
+        "note": note
+    }).execute()
+    await ctx.send(f"✅ Whitelisted Roblox User ID `{roblox_userid}`.")
+
+@bot.command()
+async def unwhitelist(ctx, roblox_userid: str):
+    if not is_admin(ctx):
+        return await ctx.send("No permission.")
+    sb.table("whitelist").delete().eq("roblox_userid", str(roblox_userid)).execute()
+    await ctx.send(f"❌ Removed `{roblox_userid}` from whitelist.")
+
+@bot.command()
+async def genkey(ctx, hours: int = 24):
+    if not is_admin(ctx):
+        return await ctx.send("No permission.")
+    new_key = generate_key_string()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+    sb.table("keys").insert({
+        "key": new_key,
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "roblox_userid": None
+    }).execute()
+    await ctx.send(f"🔑 Generated custom key: `{new_key}` (Valid for {hours}h)")
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
     bot.run(TOKEN)

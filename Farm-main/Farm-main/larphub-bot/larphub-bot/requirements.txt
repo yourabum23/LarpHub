@@ -1,0 +1,6 @@
+discord.py==2.4.0
+supabase==2.10.0
+python-dotenv==1.0.1
+flask==3.0.3
+gunicorn==23.0.0
+audioop-lts; python_version >= "3.13"

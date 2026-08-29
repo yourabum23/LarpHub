@@ -2,6 +2,7 @@ import os
 import secrets
 import string
 import threading
+import requests
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, make_response, render_template_string
 import discord
@@ -12,6 +13,7 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 ADMIN_ROLE_ID = int(os.environ["ADMIN_ROLE_ID"])
+WORKINK_API_KEY = os.environ["WORKINK_API_KEY"]
 PORT = int(os.environ.get("PORT", 10000))
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -28,6 +30,53 @@ def get_client_ip():
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
+
+def verify_workink_token(token: str, client_ip: str) -> tuple[bool, str]:
+    """Calls Work.ink's authenticated token verification endpoint.
+
+    Uses deleteToken=1 so Work.ink invalidates the token as part of this
+    same call -- that's what enforces single-use, so we don't need our
+    own used-tokens table on top of it.
+
+    Returns (ok, reason). reason is a short string useful for logging /
+    picking which error page to show; the 401/403 cases indicate a
+    config problem on our side, not something the visitor did wrong.
+    """
+    if not token:
+        return False, "missing_token"
+
+    try:
+        resp = requests.get(
+            f"https://work.ink/_api/v2/token/verify/{token}",
+            headers={"X-Api-Key": WORKINK_API_KEY},
+            params={"deleteToken": 1},
+            timeout=5,
+        )
+    except requests.RequestException:
+        return False, "network_error"
+
+    if resp.status_code == 401:
+        return False, "bad_api_key"
+    if resp.status_code == 403:
+        return False, "wrong_account"
+    if resp.status_code != 200:
+        return False, "unexpected_status"
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return False, "bad_json"
+
+    if not data.get("valid"):
+        return False, "invalid_or_used"
+
+    info = data.get("info") or {}
+    token_ip = info.get("byIp")
+
+    if token_ip and len(token_ip) <= 45 and token_ip != client_ip:
+        return False, "ip_mismatch"
+
+    return True, "ok"
 
 KEY_PAGE_HTML = """
 <!DOCTYPE html>
@@ -129,34 +178,90 @@ KEY_PAGE_HTML = """
 </html>
 """
 
+ERROR_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Larp Hub - Checkpoint Required</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body {
+            background-color: #120808;
+            color: #ffffff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .card {
+            background-color: #1f0d0d;
+            border: 2px solid #bc3e3e;
+            border-radius: 16px;
+            padding: 36px 30px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+        }
+        h1 { color: #bc3e3e; font-size: 24px; margin-bottom: 16px; }
+        p { color: #d6b4b4; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+        .btn {
+            display: inline-block;
+            background-color: #bc3e3e;
+            color: #ffffff;
+            text-decoration: none;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>{{ heading }}</h1>
+        <p>{{ message_text }}</p>
+        <a class="btn" href="{{ workink_url }}">Start Checkpoint</a>
+    </div>
+</body>
+</html>
+"""
+
+WORKINK_ENTRY_URL = os.environ.get("WORKINK_ENTRY_URL", "https://work.ink/3KN/get-key")
+
+
 @app.route("/getkey", methods=["GET"])
 def get_key_page():
     now_iso = datetime.now(timezone.utc).isoformat()
     client_ip = get_client_ip()
     cookie_key = request.cookies.get("larp_active_key")
-    
+    token = request.args.get("token")
+
     active_key_data = None
-    
+
     if cookie_key:
         res = sb.table("keys").select("*").eq("key", cookie_key).gt("expires_at", now_iso).execute()
         if res.data:
             active_key_data = res.data[0]
-            
+
     if not active_key_data and client_ip:
         res = sb.table("keys").select("*").eq("ip_address", client_ip).gt("expires_at", now_iso).order("created_at", desc=True).limit(1).execute()
         if res.data:
             active_key_data = res.data[0]
-            
+
     if active_key_data:
         key = active_key_data["key"]
         expires_at = datetime.fromisoformat(active_key_data["expires_at"].replace("Z", "+00:00"))
         remaining = expires_at - datetime.now(timezone.utc)
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
-        
+
         tag_text = f"ACTIVE KEY ({hours}h {minutes}m remaining)"
         message_text = "You already have an active 24-hour key. You don't need to do any more checkpoints until this key expires!"
-        
+
         response = make_response(render_template_string(
             KEY_PAGE_HTML,
             key=key,
@@ -166,9 +271,38 @@ def get_key_page():
         response.set_cookie("larp_active_key", key, max_age=int(remaining.total_seconds()), httponly=True, samesite="Lax")
         return response
 
+    if not token:
+        return render_template_string(
+            ERROR_PAGE_HTML,
+            heading="Checkpoint Required",
+            message_text="You need to complete the checkpoint before you can get a key.",
+            workink_url=WORKINK_ENTRY_URL,
+        ), 400
+
+    ok, reason = verify_workink_token(token, client_ip)
+
+    if not ok:
+        if reason == "invalid_or_used":
+            message_text = "This checkpoint link is invalid, expired, or has already been redeemed. Please complete a new checkpoint to get a fresh key."
+        elif reason == "ip_mismatch":
+            message_text = "This checkpoint was completed from a different network. Please complete the checkpoint yourself to get your own key."
+        elif reason in ("bad_api_key", "wrong_account"):
+            # Config problem on our end -- log it, don't blame the visitor.
+            app.logger.error(f"Work.ink verification config error: {reason}")
+            message_text = "Something's misconfigured on our end. Please try again shortly or contact staff."
+        else:
+            message_text = "We couldn't verify that checkpoint. Please complete it again."
+
+        return render_template_string(
+            ERROR_PAGE_HTML,
+            heading="Checkpoint Verification Failed",
+            message_text=message_text,
+            workink_url=WORKINK_ENTRY_URL,
+        ), 400
+
     new_key = generate_key_string()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-    
+
     sb.table("keys").insert({
         "key": new_key,
         "ip_address": client_ip,
@@ -176,7 +310,7 @@ def get_key_page():
         "created_at": now_iso,
         "roblox_userid": None
     }).execute()
-    
+
     response = make_response(render_template_string(
         KEY_PAGE_HTML,
         key=new_key,
@@ -199,7 +333,7 @@ def redeem_key():
 
     now_iso = datetime.now(timezone.utc).isoformat()
     res = sb.table("keys").select("*").eq("key", key).gt("expires_at", now_iso).execute()
-    
+
     if not res.data:
         return jsonify({"valid": False, "message": "Key is invalid or expired"}), 200
 

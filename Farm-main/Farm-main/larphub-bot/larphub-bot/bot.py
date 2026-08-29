@@ -15,9 +15,10 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 ADMIN_ROLE_ID = int(os.environ["ADMIN_ROLE_ID"])
 WORKINK_API_KEY = os.environ["WORKINK_API_KEY"]
 PORT = int(os.environ.get("PORT", 10000))
+WORKINK_ENTRY_URL = os.environ.get("WORKINK_ENTRY_URL", "https://work.ink/2U7C/larp-hub-key")
+SCRIPT_LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/yourabum23/LarpHub/refs/heads/main/Farm-main/Farm-main/larphub-bot/larphub-bot/LarpHub.lua"))()'
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 app = Flask(__name__)
 
 def generate_key_string():
@@ -32,19 +33,8 @@ def get_client_ip():
     return request.remote_addr
 
 def verify_workink_token(token: str, client_ip: str) -> tuple[bool, str]:
-    """Calls Work.ink's authenticated token verification endpoint.
-
-    Uses deleteToken=1 so Work.ink invalidates the token as part of this
-    same call -- that's what enforces single-use, so we don't need our
-    own used-tokens table on top of it.
-
-    Returns (ok, reason). reason is a short string useful for logging /
-    picking which error page to show; the 401/403 cases indicate a
-    config problem on our side, not something the visitor did wrong.
-    """
     if not token:
         return False, "missing_token"
-
     try:
         resp = requests.get(
             f"https://work.ink/_api/v2/token/verify/{token}",
@@ -72,7 +62,6 @@ def verify_workink_token(token: str, client_ip: str) -> tuple[bool, str]:
 
     info = data.get("info") or {}
     token_ip = info.get("byIp")
-
     if token_ip and len(token_ip) <= 45 and token_ip != client_ip:
         return False, "ip_mismatch"
 
@@ -87,68 +76,15 @@ KEY_PAGE_HTML = """
     <title>Larp Hub - 24-Hour Key</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        body {
-            background-color: #120808;
-            color: #ffffff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .card {
-            background-color: #1f0d0d;
-            border: 2px solid #bc3e3e;
-            border-radius: 16px;
-            padding: 36px 30px;
-            max-width: 440px;
-            width: 100%;
-            text-align: center;
-            box-shadow: 0 10px 30px rgba(188, 62, 62, 0.25);
-        }
+        body { background-color: #120808; color: #ffffff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background-color: #1f0d0d; border: 2px solid #bc3e3e; border-radius: 16px; padding: 36px 30px; max-width: 440px; width: 100%; text-align: center; box-shadow: 0 10px 30px rgba(188,62,62,0.25); }
         h1 { color: #bc3e3e; font-size: 28px; margin-bottom: 8px; }
-        .tag {
-            display: inline-block;
-            background: #381212;
-            color: #ff8585;
-            font-size: 12px;
-            padding: 4px 12px;
-            border-radius: 20px;
-            margin-bottom: 20px;
-            font-weight: bold;
-        }
+        .tag { display: inline-block; background: #381212; color: #ff8585; font-size: 12px; padding: 4px 12px; border-radius: 20px; margin-bottom: 20px; font-weight: bold; }
         p { color: #d6b4b4; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
-        .key-container {
-            background-color: #2b1111;
-            border: 1px dashed #bc3e3e;
-            border-radius: 10px;
-            padding: 16px;
-            font-size: 20px;
-            font-weight: bold;
-            color: #ffffff;
-            letter-spacing: 2px;
-            margin-bottom: 20px;
-            user-select: all;
-            word-break: break-all;
-        }
-        .btn {
-            background-color: #bc3e3e;
-            color: #ffffff;
-            border: none;
-            border-radius: 8px;
-            padding: 12px 24px;
-            font-size: 15px;
-            font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            transition: 0.2s ease;
-        }
+        .key-container { background-color: #2b1111; border: 1px dashed #bc3e3e; border-radius: 10px; padding: 16px; font-size: 20px; font-weight: bold; color: #ffffff; letter-spacing: 2px; margin-bottom: 20px; user-select: all; word-break: break-all; }
+        .btn { background-color: #bc3e3e; color: #ffffff; border: none; border-radius: 8px; padding: 12px 24px; font-size: 15px; font-weight: bold; cursor: pointer; width: 100%; transition: 0.2s ease; }
         .btn:hover { background-color: #d64a4a; }
-        .note {
-            margin-top: 18px;
-            font-size: 12px;
-            color: #997575;
-        }
+        .note { margin-top: 18px; font-size: 12px; color: #997575; }
     </style>
 </head>
 <body>
@@ -167,10 +103,7 @@ KEY_PAGE_HTML = """
                 var btn = document.querySelector(".btn");
                 btn.innerText = "Copied to Clipboard!";
                 btn.style.backgroundColor = "#2e8b57";
-                setTimeout(function() {
-                    btn.innerText = "Copy Key";
-                    btn.style.backgroundColor = "#bc3e3e";
-                }, 2000);
+                setTimeout(function() { btn.innerText = "Copy Key"; btn.style.backgroundColor = "#bc3e3e"; }, 2000);
             });
         }
     </script>
@@ -187,37 +120,11 @@ ERROR_PAGE_HTML = """
     <title>Larp Hub - Checkpoint Required</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        body {
-            background-color: #120808;
-            color: #ffffff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .card {
-            background-color: #1f0d0d;
-            border: 2px solid #bc3e3e;
-            border-radius: 16px;
-            padding: 36px 30px;
-            max-width: 440px;
-            width: 100%;
-            text-align: center;
-        }
+        body { background-color: #120808; color: #ffffff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background-color: #1f0d0d; border: 2px solid #bc3e3e; border-radius: 16px; padding: 36px 30px; max-width: 440px; width: 100%; text-align: center; }
         h1 { color: #bc3e3e; font-size: 24px; margin-bottom: 16px; }
         p { color: #d6b4b4; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
-        .btn {
-            display: inline-block;
-            background-color: #bc3e3e;
-            color: #ffffff;
-            text-decoration: none;
-            border: none;
-            border-radius: 8px;
-            padding: 12px 24px;
-            font-size: 15px;
-            font-weight: bold;
-        }
+        .btn { display: inline-block; background-color: #bc3e3e; color: #ffffff; text-decoration: none; border: none; border-radius: 8px; padding: 12px 24px; font-size: 15px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -230,16 +137,12 @@ ERROR_PAGE_HTML = """
 </html>
 """
 
-WORKINK_ENTRY_URL = os.environ.get("WORKINK_ENTRY_URL", "https://work.ink/3KN/get-key")
-
-
 @app.route("/getkey", methods=["GET"])
 def get_key_page():
     now_iso = datetime.now(timezone.utc).isoformat()
     client_ip = get_client_ip()
     cookie_key = request.cookies.get("larp_active_key")
     token = request.args.get("token")
-
     active_key_data = None
 
     if cookie_key:
@@ -258,15 +161,11 @@ def get_key_page():
         remaining = expires_at - datetime.now(timezone.utc)
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
-
-        tag_text = f"ACTIVE KEY ({hours}h {minutes}m remaining)"
-        message_text = "You already have an active 24-hour key. You don't need to do any more checkpoints until this key expires!"
-
         response = make_response(render_template_string(
             KEY_PAGE_HTML,
             key=key,
-            tag_text=tag_text,
-            message_text=message_text
+            tag_text=f"ACTIVE KEY ({hours}h {minutes}m remaining)",
+            message_text="You already have an active 24-hour key. You don't need to do any more checkpoints until this key expires!"
         ))
         response.set_cookie("larp_active_key", key, max_age=int(remaining.total_seconds()), httponly=True, samesite="Lax")
         return response
@@ -283,26 +182,23 @@ def get_key_page():
 
     if not ok:
         if reason == "invalid_or_used":
-            message_text = "This checkpoint link is invalid, expired, or has already been redeemed. Please complete a new checkpoint to get a fresh key."
+            msg = "This checkpoint link is invalid, expired, or has already been redeemed. Please complete a new checkpoint."
         elif reason == "ip_mismatch":
-            message_text = "This checkpoint was completed from a different network. Please complete the checkpoint yourself to get your own key."
+            msg = "This checkpoint was completed from a different network. You must complete the checkpoint yourself."
         elif reason in ("bad_api_key", "wrong_account"):
-            # Config problem on our end -- log it, don't blame the visitor.
             app.logger.error(f"Work.ink verification config error: {reason}")
-            message_text = "Something's misconfigured on our end. Please try again shortly or contact staff."
+            msg = "Something's misconfigured on our end. Please try again shortly or contact staff."
         else:
-            message_text = "We couldn't verify that checkpoint. Please complete it again."
-
+            msg = "We couldn't verify that checkpoint. Please complete it again."
         return render_template_string(
             ERROR_PAGE_HTML,
             heading="Checkpoint Verification Failed",
-            message_text=message_text,
+            message_text=msg,
             workink_url=WORKINK_ENTRY_URL,
         ), 400
 
     new_key = generate_key_string()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-
     sb.table("keys").insert({
         "key": new_key,
         "ip_address": client_ip,
@@ -323,44 +219,32 @@ def get_key_page():
 
 @app.route("/redeem", methods=["POST"])
 def redeem_key():
-    """Validates key and locks it to the player's Roblox UserID"""
     data = request.json or {}
     key = data.get("key", "").strip()
     roblox_userid = str(data.get("roblox_userid", "")).strip()
-
     if not key or not roblox_userid:
         return jsonify({"valid": False, "message": "Missing key or userid"}), 400
-
     now_iso = datetime.now(timezone.utc).isoformat()
     res = sb.table("keys").select("*").eq("key", key).gt("expires_at", now_iso).execute()
-
     if not res.data:
         return jsonify({"valid": False, "message": "Key is invalid or expired"}), 200
-
     record = res.data[0]
-
     if record.get("roblox_userid") and record["roblox_userid"] != roblox_userid:
         return jsonify({"valid": False, "message": "This key is bound to another Roblox account"}), 200
-
     if not record.get("roblox_userid"):
         sb.table("keys").update({"roblox_userid": roblox_userid}).eq("key", key).execute()
-
     return jsonify({"valid": True, "message": "Key accepted!"}), 200
 
 
 @app.route("/check", methods=["POST"])
 def check_key():
-    """Checks if a saved key is still valid and owned by the player"""
     data = request.json or {}
     key = data.get("key", "").strip()
     roblox_userid = str(data.get("roblox_userid", "")).strip()
-
     if not key or not roblox_userid:
         return jsonify({"valid": False}), 400
-
     now_iso = datetime.now(timezone.utc).isoformat()
     res = sb.table("keys").select("*").eq("key", key).eq("roblox_userid", roblox_userid).gt("expires_at", now_iso).execute()
-
     if res.data:
         return jsonify({"valid": True}), 200
     return jsonify({"valid": False}), 200
@@ -370,16 +254,191 @@ def check_key():
 def index():
     return "Larp Hub API is online."
 
+class TransferModal(discord.ui.Modal, title="Transfer Whitelist"):
+    target_roblox_id = discord.ui.TextInput(
+        label="New Owner's Roblox User ID",
+        placeholder="Enter the Roblox User ID of the person receiving your whitelist...",
+        min_length=1,
+        max_length=30
+    )
+
+    def __init__(self, current_discord_tag: str):
+        super().__init__()
+        self.current_discord_tag = current_discord_tag
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_roblox_id = self.target_roblox_id.value.strip()
+
+        res = sb.table("whitelist").select("*").eq("discord_tag", self.current_discord_tag).execute()
+        if not res.data:
+            await interaction.response.send_message(
+                "❌ You are not in the whitelist. You can't transfer what you don't have.",
+                ephemeral=True
+            )
+            return
+
+        entry = res.data[0]
+        old_roblox_id = entry["roblox_userid"]
+
+        sb.table("whitelist").delete().eq("discord_tag", self.current_discord_tag).execute()
+        sb.table("whitelist").insert({
+            "roblox_userid": new_roblox_id,
+            "discord_tag": f"Transferred from {self.current_discord_tag}",
+            "note": f"Transferred from Roblox ID {old_roblox_id} by {self.current_discord_tag}"
+        }).execute()
+
+        await interaction.response.send_message(
+            f"✅ Your whitelist has been permanently transferred to Roblox User ID `{new_roblox_id}`.\n"
+            f"You have been removed from the whitelist. You will need to re-purchase to regain access.",
+            ephemeral=True
+        )
+
+
+class TransferConfirmView(discord.ui.View):
+    def __init__(self, discord_tag: str):
+        super().__init__(timeout=60)
+        self.discord_tag = discord_tag
+
+    @discord.ui.button(label="⚠️ I Understand — Transfer Now", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TransferModal(self.discord_tag))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ Transfer cancelled. Your whitelist is safe.", view=None)
+
+
+class ScriptView(discord.ui.View):
+    """Persistent view with Copy Script and Transfer buttons."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="📋 Copy Script",
+        style=discord.ButtonStyle.red,
+        custom_id="larphub:copy_script"
+    )
+    async def copy_script(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"**Copy the script below and paste it into your executor:**\n"
+            f"```lua\n{SCRIPT_LOADSTRING}\n```\n"
+            f"*Only you can see this message.*",
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="🔄 Transfer Whitelist",
+        style=discord.ButtonStyle.grey,
+        custom_id="larphub:transfer_whitelist"
+    )
+    async def transfer_whitelist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        discord_tag = str(interaction.user)
+
+        res = sb.table("whitelist").select("roblox_userid").eq("discord_tag", discord_tag).execute()
+        if not res.data:
+            await interaction.response.send_message(
+                "❌ You are not whitelisted. Only premium users with an active whitelist can transfer.",
+                ephemeral=True
+            )
+            return
+
+        warning_embed = discord.Embed(
+            title="⚠️ Warning — This Action is Permanent",
+            description=(
+                "**Transferring your whitelist cannot be undone.**\n\n"
+                "• You will be **removed from the whitelist** immediately.\n"
+                "• The new user will receive your premium access.\n"
+                "• You will need to **re-purchase** if you want access again.\n\n"
+                "Are you absolutely sure you want to continue?"
+            ),
+            color=discord.Color.orange()
+        )
+
+        await interaction.response.send_message(
+            embed=warning_embed,
+            view=TransferConfirmView(discord_tag),
+            ephemeral=True
+        )
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
 def is_admin(ctx):
     return any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles)
 
+
 @bot.event
 async def on_ready():
+
+    await bot.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.watching, name="LarpHub")
+    )
+
+    bot.add_view(ScriptView())
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+
+
+@bot.command()
+async def script(ctx):
+    """Posts the LarpHub info embed with Copy Script and Transfer buttons. Admin only."""
+    if not is_admin(ctx):
+        return await ctx.send("❌ No permission.")
+
+    embed = discord.Embed(
+        title="<:larphub:> Larp Hub",
+        description=(
+            "Welcome to **Larp Hub** — the ultimate Roblox farming script.\n"
+            "Use the buttons below to get the script or manage your whitelist."
+        ),
+        color=discord.Color.from_rgb(188, 62, 62)
+    )
+
+    embed.add_field(
+        name="📜 How to Use the Script",
+        value=(
+            "1. Click **📋 Copy Script** below.\n"
+            "2. Open your Roblox executor (e.g. Synapse, KRNL, Delta).\n"
+            "3. Paste the script and hit **Execute**.\n"
+            "4. Enter your key when prompted."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔑 How to Get a Free Key",
+        value=(
+            f"1. Visit the [key checkpoint]({WORKINK_ENTRY_URL}).\n"
+            "2. Complete the short tasks on the page.\n"
+            "3. Your key will be shown — copy and paste it into Larp Hub.\n"
+            "4. Keys last **24 hours**. Come back tomorrow for a new one."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="💎 Premium / Whitelist",
+        value=(
+            "Want **permanent access** with no daily key needed?\n"
+            "Create a **ticket** in this server to purchase Premium.\n"
+            "Premium users can also use the **🔄 Transfer** button to give their "
+            "whitelist to another user *(this is permanent and cannot be undone)*."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Larp Hub • Use responsibly")
+    embed.set_thumbnail(url="https://i.imgur.com/your_logo_here.png")
+
+    await ctx.send(embed=embed, view=ScriptView())
+
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
 
 @bot.command()
 async def whitelist(ctx, roblox_userid: str, *, note: str = ""):
@@ -392,12 +451,14 @@ async def whitelist(ctx, roblox_userid: str, *, note: str = ""):
     }).execute()
     await ctx.send(f"✅ Whitelisted Roblox User ID `{roblox_userid}`.")
 
+
 @bot.command()
 async def unwhitelist(ctx, roblox_userid: str):
     if not is_admin(ctx):
         return await ctx.send("No permission.")
     sb.table("whitelist").delete().eq("roblox_userid", str(roblox_userid)).execute()
     await ctx.send(f"❌ Removed `{roblox_userid}` from whitelist.")
+
 
 @bot.command()
 async def genkey(ctx, hours: int = 24):
@@ -415,6 +476,7 @@ async def genkey(ctx, hours: int = 24):
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
+
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)

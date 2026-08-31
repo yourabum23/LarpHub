@@ -461,7 +461,7 @@ class ScriptView(discord.ui.View):
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 def is_admin(ctx):
     return any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles)

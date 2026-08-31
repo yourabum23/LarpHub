@@ -502,6 +502,76 @@ async def script(ctx):
     try: await ctx.message.delete()
     except discord.Forbidden: pass
 
+@bot.command(name="help")
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="📖 Larp Hub Commands",
+        description="List of available bot commands and how to use them.",
+        color=discord.Color.from_rgb(188, 62, 62),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    # Public / general
+    embed.add_field(
+        name="🎮 General",
+        value=(
+            "`!script` — Post the Larp Hub script panel (admin only)\n"
+            "`!help` — Show this help message"
+        ),
+        inline=False
+    )
+
+    # Admin commands
+    embed.add_field(
+        name="🔑 Key Management (Admin)",
+        value=(
+            "`!genkey [hours]` — Generate a key (default 24h)\n"
+            "Example: `!genkey 48`\n\n"
+            "`!blacklist <key>` — Blacklist a key\n"
+            "`!unblacklist <key>` — Remove blacklist from a key\n"
+            "`!keyinfo <key>` — View detailed info about a key"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="💎 Whitelist (Admin)",
+        value=(
+            "`!whitelist <roblox_userid> [note]` — Add someone to permanent whitelist\n"
+            "Example: `!whitelist 123456789 VIP buyer`\n\n"
+            "`!unwhitelist <roblox_userid>` — Remove from whitelist\n"
+            "`!whitelistcheck <roblox_userid>` — Check if a user is whitelisted"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔗 Referrals (Admin)",
+        value=(
+            "`!myreferral <roblox_userid>` — Create or view a referral code for a user\n"
+            "Every **3 uses** of a referral code = **48h bonus key** for the owner"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📊 Stats (Admin)",
+        value="`!stats` — Show total active keys, keys today, blacklisted, whitelist count, etc.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🖥️ Buttons (from !script panel)",
+        value=(
+            "**📋 Copy Script** — Get the loadstring\n"
+            "**🔄 Transfer Whitelist** — Permanently move your whitelist to another Roblox ID\n"
+            "**🖥️ Reset HWID** — Reset HWID on a key (once per key)"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Larp Hub • Admin commands require the admin role")
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def whitelist(ctx, roblox_userid: str, *, note: str = ""):

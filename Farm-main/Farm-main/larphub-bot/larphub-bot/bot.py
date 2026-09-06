@@ -384,38 +384,45 @@ class TransferModal(discord.ui.Modal, title="Transfer Whitelist"):
     target_roblox_id = discord.ui.TextInput(
         label="New Owner's Roblox User ID",
         placeholder="Enter their Roblox User ID...",
-        min_length=1, max_length=30,
+        min_length=3,
+        max_length=20,
     )
 
-    def __init__(self, current_discord_tag: str):
+    def __init__(self, current_discord_tag: str, current_roblox_id: str):
         super().__init__()
         self.current_discord_tag = current_discord_tag
+        self.current_roblox_id = current_roblox_id
 
     async def on_submit(self, interaction: discord.Interaction):
         new_id = self.target_roblox_id.value.strip()
-        res = sb.table("whitelist").select("*").eq("discord_tag", self.current_discord_tag).execute()
-        if not res.data:
-            await interaction.response.send_message("❌ You are not in the whitelist.", ephemeral=True)
-            return
-        old_id = res.data[0]["roblox_userid"]
-        sb.table("whitelist").delete().eq("discord_tag", self.current_discord_tag).execute()
+
+        sb.table("whitelist").delete().eq("roblox_userid", self.current_roblox_id).execute()
+
         sb.table("whitelist").insert({
             "roblox_userid": new_id,
-            "discord_tag": f"Transferred from {self.current_discord_tag}",
-            "note": f"Transferred from Roblox ID {old_id} by {self.current_discord_tag}",
+            "discord_id": str(interaction.user.id),
+            "discord_tag": str(interaction.user),
+            "note": f"Transferred from Roblox ID {self.current_roblox_id}",
+            "added_by": f"Transfer by {self.current_discord_tag}",
+            "added_at": datetime.now(timezone.utc).isoformat()
         }).execute()
+
         await interaction.response.send_message(
-            f"✅ Whitelist permanently transferred to Roblox ID `{new_id}`.\nYou have been removed from the whitelist.", ephemeral=True)
+            f"✅ Whitelist successfully transferred!\n"
+            f"Old Roblox ID: `{self.current_roblox_id}` → New: `{new_id}`",
+            ephemeral=True
+        )
 
 
 class TransferConfirmView(discord.ui.View):
-    def __init__(self, discord_tag: str):
+    def __init__(self, discord_tag: str, current_roblox_id: str):
         super().__init__(timeout=60)
         self.discord_tag = discord_tag
+        self.current_roblox_id = current_roblox_id
 
     @discord.ui.button(label="⚠️ I Understand — Transfer Now", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TransferModal(self.discord_tag))
+        await interaction.response.send_modal(TransferModal(self.discord_tag, self.current_roblox_id))
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -432,25 +439,44 @@ class ScriptView(discord.ui.View):
             f"**Paste this into your executor:**\n```lua\n{SCRIPT_LOADSTRING}\n```\n*Only you can see this.*",
             ephemeral=True)
 
-    @discord.ui.button(label="🔄 Transfer Whitelist", style=discord.ButtonStyle.grey, custom_id="larphub:transfer_whitelist")
-    async def transfer_whitelist(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tag = str(interaction.user)
-        res = sb.table("whitelist").select("roblox_userid").eq("discord_tag", tag).execute()
-        if not res.data:
-            await interaction.response.send_message("❌ You are not whitelisted.", ephemeral=True)
-            return
-        embed = discord.Embed(
-            title="⚠️ Warning — This Action is Permanent",
-            description=(
-                "**Transferring your whitelist cannot be undone.**\n\n"
-                "• You will be **removed from the whitelist** immediately.\n"
-                "• The new user receives your premium access.\n"
-                "• You must **re-purchase** to regain access.\n\n"
-                "Are you absolutely sure?"
-            ),
-            color=discord.Color.orange(),
+@discord.ui.button(label="🔄 Transfer Whitelist", style=discord.ButtonStyle.grey, custom_id="larphub:transfer_whitelist")
+async def transfer_whitelist(self, interaction: discord.Interaction, button: discord.ui.Button):
+    user_id = str(interaction.user.id)
+
+    # Check by Discord ID (much more reliable than tag)
+    res = sb.table("whitelist").select("*").eq("discord_id", user_id).execute()
+
+    if not res.data:
+        # Fallback: try by discord_tag (for old entries)
+        res = sb.table("whitelist").select("*").eq("discord_tag", str(interaction.user)).execute()
+
+    if not res.data:
+        await interaction.response.send_message(
+            "❌ You are not linked to any whitelist entry.\n"
+            "Only the Discord account that was linked when the whitelist was created can transfer it.",
+            ephemeral=True
         )
-        await interaction.response.send_message(embed=embed, view=TransferConfirmView(tag), ephemeral=True)
+        return
+
+    record = res.data[0]
+
+    embed = discord.Embed(
+        title="⚠️ Warning — This Action is Permanent",
+        description=(
+            f"**You are about to transfer whitelist for Roblox ID `{record['roblox_userid']}`**\n\n"
+            "• You will be **removed** from the whitelist immediately.\n"
+            "• The new Roblox ID will receive permanent access.\n"
+            "• This **cannot** be undone.\n\n"
+            "Are you sure?"
+        ),
+        color=discord.Color.orange(),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=TransferConfirmView(str(interaction.user), record["roblox_userid"]),
+        ephemeral=True
+    )
 
     @discord.ui.button(label="🖥️ Reset HWID", style=discord.ButtonStyle.grey, custom_id="larphub:reset_hwid")
     async def reset_hwid(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -574,10 +600,25 @@ async def help_command(ctx):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def whitelist(ctx, roblox_userid: str, *, note: str = ""):
-    if not is_admin(ctx): return await ctx.send("No permission.")
-    sb.table("whitelist").upsert({"roblox_userid": str(roblox_userid), "discord_tag": str(ctx.author), "note": note}).execute()
-    await ctx.send(f"✅ Whitelisted `{roblox_userid}`.")
+async def whitelist(ctx, roblox_userid: str, discord_user: discord.Member = None, *, note: str = ""):
+    if not is_admin(ctx):
+        return await ctx.send("No permission.")
+
+    target_discord = discord_user or ctx.author
+
+    sb.table("whitelist").upsert({
+        "roblox_userid": str(roblox_userid),
+        "discord_id": str(target_discord.id),
+        "discord_tag": str(target_discord),
+        "note": note,
+        "added_by": str(ctx.author),
+        "added_at": datetime.now(timezone.utc).isoformat()
+    }).execute()
+
+    await ctx.send(
+        f"✅ Whitelisted Roblox ID `{roblox_userid}`\n"
+        f"Linked to: {target_discord.mention} (`{target_discord}`)"
+    )
 
 @bot.command()
 async def unwhitelist(ctx, roblox_userid: str):

@@ -600,25 +600,43 @@ async def help_command(ctx):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def whitelist(ctx, roblox_userid: str, discord_user: discord.Member = None, *, note: str = ""):
+async def whitelist(ctx, roblox_userid: str, *, args: str = ""):
     if not is_admin(ctx):
-        return await ctx.send("No permission.")
+        return await ctx.send("❌ No permission.")
+
+    parts = args.split(maxsplit=1)
+    discord_user = None
+    note = ""
+
+    if parts:
+
+        if ctx.message.mentions:
+            discord_user = ctx.message.mentions[0]
+
+            note = args.replace(f"<@{discord_user.id}>", "").replace(f"<@!{discord_user.id}>", "").strip()
+        else:
+            note = args.strip()
 
     target_discord = discord_user or ctx.author
 
-    sb.table("whitelist").upsert({
-        "roblox_userid": str(roblox_userid),
-        "discord_id": str(target_discord.id),
-        "discord_tag": str(target_discord),
-        "note": note,
-        "added_by": str(ctx.author),
-        "added_at": datetime.now(timezone.utc).isoformat()
-    }).execute()
+    try:
+        sb.table("whitelist").upsert({
+            "roblox_userid": str(roblox_userid),
+            "discord_id": str(target_discord.id),
+            "discord_tag": str(target_discord),
+            "note": note,
+            "added_by": str(ctx.author),
+            "added_at": datetime.now(timezone.utc).isoformat()
+        }).execute()
 
-    await ctx.send(
-        f"✅ Whitelisted Roblox ID `{roblox_userid}`\n"
-        f"Linked to: {target_discord.mention} (`{target_discord}`)"
-    )
+        await ctx.send(
+            f"✅ **Whitelisted successfully!**\n"
+            f"Roblox ID: `{roblox_userid}`\n"
+            f"Linked to: {target_discord.mention} (`{target_discord}`)\n"
+            f"Note: `{note or 'None'}`"
+        )
+    except Exception as e:
+        await ctx.send(f"❌ Error while saving to database:\n```{e}```")
 
 @bot.command()
 async def unwhitelist(ctx, roblox_userid: str):

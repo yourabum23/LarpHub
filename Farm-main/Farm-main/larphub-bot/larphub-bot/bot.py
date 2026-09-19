@@ -88,7 +88,10 @@ def schedule_log(title: str, description: str, color: int = 0xbc3e3e):
     async def _send():
         ch = bot.get_channel(KEY_LOG_CHANNEL_ID)
         if not ch:
-            return
+            try:
+                ch = await bot.fetch_channel(KEY_LOG_CHANNEL_ID)
+            except Exception:
+                return
         embed = discord.Embed(title=title, description=description,
                               color=discord.Color(color), timestamp=datetime.now(timezone.utc))
         try:
@@ -332,13 +335,20 @@ def check_key():
     roblox_userid = str(data.get("roblox_userid", "")).strip()
     hwid = data.get("hwid", "").strip()
 
-    if not key or not roblox_userid:
-        return jsonify({"valid": False}), 400
+    if not roblox_userid:
+        return jsonify({"valid": False, "message": "Missing roblox_userid"}), 400
+
+    wl = sb.table("whitelist").select("*").eq("roblox_userid", roblox_userid).execute()
+    if wl.data:
+        return jsonify({"valid": True, "whitelisted": True}), 200
+
+    if not key:
+        return jsonify({"valid": False, "message": "Missing key"}), 400
 
     now_iso = datetime.now(timezone.utc).isoformat()
     res = sb.table("keys").select("*").eq("key", key).eq("roblox_userid", roblox_userid).gt("expires_at", now_iso).execute()
     if not res.data:
-        return jsonify({"valid": False}), 200
+        return jsonify({"valid": False, "message": "Key is invalid or expired"}), 200
 
     record = res.data[0]
     if record.get("blacklisted"):
@@ -396,22 +406,28 @@ class TransferModal(discord.ui.Modal, title="Transfer Whitelist"):
     async def on_submit(self, interaction: discord.Interaction):
         new_id = self.target_roblox_id.value.strip()
 
-        sb.table("whitelist").delete().eq("roblox_userid", self.current_roblox_id).execute()
+        try:
 
-        sb.table("whitelist").insert({
-            "roblox_userid": new_id,
-            "discord_id": str(interaction.user.id),
-            "discord_tag": str(interaction.user),
-            "note": f"Transferred from Roblox ID {self.current_roblox_id}",
-            "added_by": f"Transfer by {self.current_discord_tag}",
-            "added_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
+            sb.table("whitelist").upsert({
+                "roblox_userid": new_id,
+                "discord_id": str(interaction.user.id),
+                "discord_tag": str(interaction.user),
+                "note": f"Transferred from Roblox ID {self.current_roblox_id}",
+                "added_by": f"Transfer by {self.current_discord_tag}",
+                "added_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
 
-        await interaction.response.send_message(
-            f"✅ Whitelist successfully transferred!\n"
-            f"Old Roblox ID: `{self.current_roblox_id}` → New: `{new_id}`",
-            ephemeral=True
-        )
+            # Delete old entry only if the upsert succeeded
+            if new_id != self.current_roblox_id:
+                sb.table("whitelist").delete().eq("roblox_userid", self.current_roblox_id).execute()
+
+            await interaction.response.send_message(
+                f"✅ Whitelist successfully transferred!\n"
+                f"Old Roblox ID: `{self.current_roblox_id}` → New: `{new_id}`",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Transfer failed: `{e}`", ephemeral=True)
 
 
 class TransferConfirmView(discord.ui.View):
@@ -437,46 +453,43 @@ class ScriptView(discord.ui.View):
     async def copy_script(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             f"**Paste this into your executor:**\n```lua\n{SCRIPT_LOADSTRING}\n```\n*Only you can see this.*",
-            ephemeral=True)
-
-@discord.ui.button(label="🔄 Transfer Whitelist", style=discord.ButtonStyle.grey, custom_id="larphub:transfer_whitelist")
-async def transfer_whitelist(self, interaction: discord.Interaction, button: discord.ui.Button):
-    user_id = str(interaction.user.id)
-
-    # Check by Discord ID (much more reliable than tag)
-    res = sb.table("whitelist").select("*").eq("discord_id", user_id).execute()
-
-    if not res.data:
-        # Fallback: try by discord_tag (for old entries)
-        res = sb.table("whitelist").select("*").eq("discord_tag", str(interaction.user)).execute()
-
-    if not res.data:
-        await interaction.response.send_message(
-            "❌ You are not linked to any whitelist entry.\n"
-            "Only the Discord account that was linked when the whitelist was created can transfer it.",
             ephemeral=True
         )
-        return
 
-    record = res.data[0]
+    @discord.ui.button(label="🔄 Transfer Whitelist", style=discord.ButtonStyle.grey, custom_id="larphub:transfer_whitelist")
+    async def transfer_whitelist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
 
-    embed = discord.Embed(
-        title="⚠️ Warning — This Action is Permanent",
-        description=(
-            f"**You are about to transfer whitelist for Roblox ID `{record['roblox_userid']}`**\n\n"
-            "• You will be **removed** from the whitelist immediately.\n"
-            "• The new Roblox ID will receive permanent access.\n"
-            "• This **cannot** be undone.\n\n"
-            "Are you sure?"
-        ),
-        color=discord.Color.orange(),
-    )
+        res = sb.table("whitelist").select("*").eq("discord_id", user_id).execute()
+        if not res.data:
+            res = sb.table("whitelist").select("*").eq("discord_tag", str(interaction.user)).execute()
 
-    await interaction.response.send_message(
-        embed=embed,
-        view=TransferConfirmView(str(interaction.user), record["roblox_userid"]),
-        ephemeral=True
-    )
+        if not res.data:
+            await interaction.response.send_message(
+                "❌ You are not linked to any whitelist entry.\n"
+                "Only the Discord account that was linked when the whitelist was created can transfer it.",
+                ephemeral=True
+            )
+            return
+
+        record = res.data[0]
+        embed = discord.Embed(
+            title="⚠️ Warning — This Action is Permanent",
+            description=(
+                f"**You are about to transfer whitelist for Roblox ID `{record['roblox_userid']}`**\n\n"
+                "• You will be **removed** from the whitelist immediately.\n"
+                "• The new Roblox ID will receive permanent access.\n"
+                "• This **cannot** be undone.\n\n"
+                "Are you sure?"
+            ),
+            color=discord.Color.orange(),
+        )
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=TransferConfirmView(str(interaction.user), record["roblox_userid"]),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="🖥️ Reset HWID", style=discord.ButtonStyle.grey, custom_id="larphub:reset_hwid")
     async def reset_hwid(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -490,15 +503,25 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 def is_admin(ctx):
-    return any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles)
+    return any(r.id == ADMIN_ROLE_ID for r in getattr(ctx.author, "roles", []))
 
 @bot.event
 async def on_ready():
     global bot_loop
-    bot_loop = asyncio.get_event_loop()
+    bot_loop = bot.loop
     bot.add_view(ScriptView())
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="LarpHub"))
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Notify in Discord when commands fail or database errors occur."""
+    if isinstance(error, commands.CommandInvokeError):
+        await ctx.send(f"❌ Database/API error: `{error.original}`")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument: `{error.param.name}`")
+    else:
+        await ctx.send(f"❌ Error: `{error}`")
 
 
 @bot.command()
